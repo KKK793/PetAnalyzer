@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSizeGrip,
@@ -68,6 +69,53 @@ def configure_windows_app_id():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("PetAnalyzer")
     except Exception:
         pass
+
+
+def is_running_as_admin():
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def show_app_warning(parent, title, message):
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Icon.Warning)
+    box.setWindowTitle(title)
+    box.setText(message)
+    box.setStandardButtons(QMessageBox.StandardButton.Ok)
+    box.setWindowIcon(QIcon(str(resource_path("assets/app.ico"))))
+    box.setStyleSheet(
+        """
+        QMessageBox {
+            background-color: #202326;
+            color: #f4f0e5;
+            font-family: "Microsoft YaHei UI";
+        }
+        QMessageBox QLabel {
+            background: transparent;
+            color: #f4f0e5;
+            font-size: 12px;
+        }
+        QMessageBox QPushButton {
+            background: #24282b;
+            border: 1px solid #383d40;
+            border-radius: 8px;
+            padding: 7px 18px;
+            color: #f4f0e5;
+            font-weight: 700;
+            min-width: 72px;
+        }
+        QMessageBox QPushButton:hover {
+            background: #2c3134;
+            border-color: #495054;
+        }
+        """
+    )
+    ok_button = box.button(QMessageBox.StandardButton.Ok)
+    if ok_button:
+        ok_button.setText("确定")
+    box.exec()
 
 
 def load_custom_plans():
@@ -168,7 +216,10 @@ class HotkeyThread(threading.Thread):
         user32 = ctypes.windll.user32
         hotkey_id = 43167
         if not user32.RegisterHotKey(None, hotkey_id, self.modifiers, self.key):
-            self.error = f"全局快捷键注册失败：{self.label}"
+            if "+" not in self.label:
+                self.error = f"全局快捷键注册失败：{self.label}。单键快捷键需要以管理员身份运行。"
+            else:
+                self.error = f"全局快捷键注册失败：{self.label}"
             self.bridge.failed.emit(self.error)
             return
         msg = ctypes.wintypes.MSG()
@@ -551,9 +602,13 @@ class MainWindow(QWidget):
         self.hotkey_btn.clicked.connect(self.app.toggle_hotkey)
         self.hotkey_state = QLabel("未启动")
         self.hotkey_state.setObjectName("muted")
+        self.hotkey_hint = QLabel("提示：单键快捷键需要以管理员身份运行；单修饰键（仅 Ctrl/Alt/Shift/Win）不可使用。")
+        self.hotkey_hint.setObjectName("muted")
+        self.hotkey_hint.setWordWrap(True)
         hotkey_grid.addWidget(self.hotkey_edit, 0, 0)
         hotkey_grid.addWidget(self.hotkey_btn, 0, 1)
         hotkey_grid.addWidget(self.hotkey_state, 1, 0, 1, 2)
+        hotkey_grid.addWidget(self.hotkey_hint, 2, 0, 1, 2)
         hotkey_grid.setColumnStretch(0, 1)
         hotkey_card.layout().addLayout(hotkey_grid)
         root.addWidget(hotkey_card)
@@ -871,11 +926,11 @@ class FloatDesktopApp:
                     modifiers.append(normalized)
             elif not key:
                 key = normalized
-        if not modifiers or not key:
-            raise ValueError("快捷键需要至少一个修饰键和一个主键")
+        if not key:
+            raise ValueError("快捷键需要一个主键，可以是单键或组合键；单修饰键不可使用")
         order = ["Ctrl", "Alt", "Shift", "Win"]
         modifiers.sort(key=lambda item: order.index(item))
-        return "+".join([*modifiers, key])
+        return "+".join([*modifiers, key] if modifiers else [key])
 
     def parse_hotkey(self, value):
         value = self.normalize_hotkey_text(value)
@@ -917,8 +972,8 @@ class FloatDesktopApp:
                 key = 0x70 + int(upper[1:]) - 1
             elif upper in key_map:
                 key = key_map[upper]
-        if not modifiers or key is None:
-            raise ValueError("快捷键需要至少一个修饰键和一个主键")
+        if key is None:
+            raise ValueError("快捷键需要一个主键，可以是单键或组合键；单修饰键不可使用")
         return modifiers | 0x4000, key
 
     def toggle_hotkey(self):
@@ -934,6 +989,18 @@ class FloatDesktopApp:
             modifiers, key = self.parse_hotkey(self.hotkey_text)
         except Exception as error:
             self.panel.message.setText(str(error))
+            return
+        if "+" not in self.hotkey_text and not is_running_as_admin():
+            message = f"单键快捷键 {self.hotkey_text} 需要以管理员身份运行后才能启动。"
+            self.stop_hotkey()
+            self.main.set_hotkey_running(False)
+            self.panel.message.setText(message)
+            self.main.hotkey_state.setText(message)
+            show_app_warning(
+                self.main,
+                "快捷键启动失败",
+                f"{message}\n\n请右键 PetAnalyzer，选择“以管理员身份运行”，然后重新启动快捷键。",
+            )
             return
         self.stop_hotkey()
         self.hotkey_thread = HotkeyThread(modifiers, key, self.hotkey_text, self.hotkey_bridge)
@@ -961,6 +1028,12 @@ class FloatDesktopApp:
         self.main.set_hotkey_running(False)
         self.panel.message.setText(message)
         self.main.hotkey_state.setText(message)
+        if "管理员" in str(message):
+            show_app_warning(
+                self.main,
+                "快捷键启动失败",
+                f"{message}\n\n请右键 PetAnalyzer，选择“以管理员身份运行”，然后重新启动快捷键。",
+            )
 
     def save_custom_plan(self):
         pet = self.main.plan_pet.text().strip()

@@ -30,6 +30,9 @@ SCREEN_STAT_ORDER = ["生命", "物攻", "魔攻", "物防", "魔防", "速度"]
 BASE_IV_VALUES = (7, 8, 9, 10)
 IV_MULTIPLIERS = (1, 2, 3, 4, 5, 6)
 VALID_IV_DISPLAY_VALUES = {base * multiplier for base in BASE_IV_VALUES for multiplier in IV_MULTIPLIERS}
+AMBIGUOUS_NATURE_TRAIT_PAIRS = {
+    ("警惕", "预警"),
+}
 TRAIT_CROP_RECTS = (
     (0.58, 0.66, 0.22, 0.22),
     (0.62, 0.54, 0.25, 0.24),
@@ -41,11 +44,12 @@ FAST_TRAIT_LINE_RECTS = (
     (0.665, 0.622, 0.105, 0.052),
     (0.654, 0.617, 0.125, 0.060),
     (0.646, 0.628, 0.145, 0.055),
-    (0.655, 0.640, 0.130, 0.060),
-    (0.657, 0.692, 0.143, 0.044),
-    (0.650, 0.684, 0.170, 0.052),
-    (0.642, 0.690, 0.205, 0.055),
-    (0.660, 0.670, 0.180, 0.060),
+    (0.650, 0.610, 0.100, 0.052),
+    (0.640, 0.625, 0.115, 0.055),
+    (0.657, 0.692, 0.095, 0.044),
+    (0.650, 0.684, 0.105, 0.052),
+    (0.642, 0.690, 0.120, 0.055),
+    (0.625, 0.695, 0.130, 0.055),
 )
 PET_NAME_LINE_RECTS = (
     (0.600, 0.100, 0.160, 0.060),
@@ -263,26 +267,43 @@ class PetData:
                     if edit_distance(compact, compact_trait) <= 1 and common_count(compact, compact_trait) >= max(1, len(compact_trait) - 1):
                         return trait
             for char, traits in self.short_trait_tail.items():
-                if char == "啪" and len(compact) >= 2 and char in compact and len(traits) == 1:
+                if char == "啪" and len(compact) >= 1 and (char in compact or "拍" in compact) and len(traits) == 1:
                     return next(iter(traits))
             return ""
         candidates.sort()
         return candidates[0][2]
 
     def guess_name(self, text: str):
+        candidates = self.name_candidates(text, limit=1)
+        if not candidates:
+            compact = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", normalize_text(text))
+            return "", 0.0 if not compact else max((similarity(compact, normalize_text(name)) for name in self.names), default=0.0)
+        name, score = candidates[0]
+        threshold = 0.92 if len(name) <= 2 else 0.72 if len(name) == 3 else 0.62
+        return (name, score) if score >= threshold else ("", score)
+
+    def name_candidates(self, text: str, limit=6):
         compact = re.sub(r"[^\u4e00-\u9fa5A-Za-z0-9]", "", normalize_text(text))
         if not compact:
-            return "", 0.0
+            return []
+        candidates = {}
         for name in self.names:
-            if normalize_text(name) in compact:
-                return name, 1.0
-        best_name, best_score = "", 0.0
+            normalized = normalize_text(name)
+            if normalized in compact:
+                candidates[name] = max(candidates.get(name, 0.0), 1.0)
         for name in self.names:
-            score = similarity(compact, normalize_text(name))
-            if score > best_score:
-                best_name, best_score = name, score
-        threshold = 0.92 if len(best_name) <= 2 else 0.72 if len(best_name) == 3 else 0.62
-        return (best_name, best_score) if best_score >= threshold else ("", best_score)
+            normalized = normalize_text(name)
+            score = similarity(compact, normalized)
+            if score < 0.50:
+                continue
+            if len(normalized) <= 2 and score < 0.92:
+                continue
+            if len(normalized) == 3 and score < 0.60:
+                continue
+            if len(normalized) >= 4 and score < 0.55:
+                continue
+            candidates[name] = max(candidates.get(name, 0.0), score)
+        return sorted(candidates.items(), key=lambda item: (-item[1], len(item[0]), item[0]))[:limit]
 
     def parse_natures(self, value):
         key = str(value or "")
@@ -1081,10 +1102,81 @@ def trait_rect_from_ocr(result, crop_shape, trait="", pet_data=None):
     return x0, y0, x1, y1
 
 
+def trait_match_from_ocr_result(result, crop_shape, crop_rect, pet_data):
+    boxes = getattr(result, "boxes", None)
+    txts = getattr(result, "txts", None) or []
+    if boxes is None or len(boxes) == 0:
+        return "", "", None
+    h, w = crop_shape[:2]
+    crop_x, crop_y, crop_w, crop_h = crop_rect
+    candidates = []
+    left_region_texts = []
+    for index, box in enumerate(boxes):
+        raw = normalize_text(txts[index] if index < len(txts) else "")
+        if not raw:
+            continue
+        compact = compact_text(raw)
+        if not compact or compact.isdigit():
+            continue
+        if any(skip in raw for skip in ("特性", "收起", "修改天分", "前往")):
+            continue
+        xs = [float(point[0]) for point in box]
+        ys = [float(point[1]) for point in box]
+        left = min(xs)
+        top = min(ys)
+        right = max(xs)
+        bottom = max(ys)
+        if right <= left or bottom <= top:
+            continue
+        original_left = crop_x + (left / max(1, w)) * crop_w
+        original_center_y = crop_y + (((top + bottom) * 0.5) / max(1, h)) * crop_h
+        # Only the text under the trait icon is allowed here. The pill to the
+        # right is a nature label and must not participate in pet matching.
+        if not (0.61 <= original_left <= 0.715 and 0.54 <= original_center_y <= 0.735):
+            continue
+        in_left_trait_region = 0.61 <= original_left <= 0.715 and 0.54 <= original_center_y <= 0.735
+        if in_left_trait_region:
+            left_region_texts.append(raw)
+        trait = pet_data.match_trait(raw)
+        if not trait:
+            continue
+        y_penalty = abs(original_center_y - 0.64)
+        x_penalty = abs(original_left - 0.675)
+        exact = normalize_text(trait) == raw
+        in_strict_region = 0.61 <= original_left <= 0.715 and 0.58 <= original_center_y <= 0.735
+        if in_strict_region:
+            candidates.append((0 if exact else 1, y_penalty, x_penalty, raw, trait, (int(left), int(top), int(right), int(bottom))))
+        elif exact:
+            candidates.append((2, y_penalty, x_penalty, raw, trait, (int(left), int(top), int(right), int(bottom))))
+    if not candidates and left_region_texts:
+        combined = "".join(left_region_texts)
+        trait = pet_data.match_trait(combined)
+        if trait:
+            return combined, trait, None
+    if not candidates:
+        return "", "", None
+    candidates.sort()
+    _not_exact, _y_penalty, _x_penalty, raw, trait, rect = candidates[0]
+    x0, y0, x1, y1 = rect
+    pad_x = max(5, min(15, int((x1 - x0) * 0.20)))
+    x0 = max(0, x0 - pad_x)
+    x1 = min(w, x1 + pad_x)
+    y0 = max(0, y0 - 5)
+    y1 = min(h, y1 + 8)
+    if x1 - x0 < 25 or y1 - y0 < 16:
+        return raw, trait, None
+    return raw, trait, (x0, y0, x1, y1)
+
+
 def trait_pet_name(pet_data, trait, plus, preferred_name=""):
     cache_key = (normalize_text(trait), plus or "", normalize_text(preferred_name))
     if cache_key in pet_data._trait_pet_cache:
         return pet_data._trait_pet_cache[cache_key]
+
+    if normalize_text(trait) in pet_data.nature_name_set and not normalize_text(preferred_name):
+        result = ("", 0.0, "")
+        pet_data._trait_pet_cache[cache_key] = result
+        return result
 
     matches = pet_data.unique_pets(pet_data.find_pets_by_trait(trait))
     if not matches:
@@ -1098,19 +1190,6 @@ def trait_pet_name(pet_data, trait, plus, preferred_name=""):
                 result = (pet.get("名字", ""), 1.0, pet.get("特性", ""))
                 pet_data._trait_pet_cache[cache_key] = result
                 return result
-    if plus:
-        for pet in matches:
-            for variant in pet_data.recommendation_variants(pet.get("名字", "")):
-                if not variant.get("natures"):
-                    result = (pet.get("名字", ""), 1.0, pet.get("特性", ""))
-                    pet_data._trait_pet_cache[cache_key] = result
-                    return result
-                for name in variant.get("natures", []):
-                    nature = NATURE_BY_NAME.get(name)
-                    if nature and nature["plus"] == plus:
-                        result = (pet.get("名字", ""), 1.0, pet.get("特性", ""))
-                        pet_data._trait_pet_cache[cache_key] = result
-                        return result
     result = (matches[0].get("名字", ""), 1.0, matches[0].get("特性", ""))
     pet_data._trait_pet_cache[cache_key] = result
     return result
@@ -1238,24 +1317,33 @@ class Recognizer:
                 pass
 
     def recognize_pet_name(self, image):
+        name, score, raw, _candidates = self.recognize_pet_name_candidates(image)
+        return name, score, raw
+
+    def recognize_pet_name_candidates(self, image):
         image_shape = image.shape[:2]
         cached_rect = self.name_cache_rect_by_shape.get(image_shape)
         rects = PET_NAME_LINE_RECTS
         if cached_rect:
             rects = (cached_rect,) + tuple(rect for rect in PET_NAME_LINE_RECTS if rect != cached_rect)
         best_name, best_score, best_raw = "", 0.0, ""
+        candidates_by_name = {}
         for rect in rects:
             crop = crop_relative_ocr_line(image, rect, target_height=64)
             raw = ocr_text(self.ocr, crop, detect=False)
+            candidates = self.pet_data.name_candidates(raw)
             name, score = self.pet_data.guess_name(raw)
             if raw and not best_raw:
                 best_raw = raw
+            for candidate_name, candidate_score in candidates:
+                candidates_by_name[candidate_name] = max(candidates_by_name.get(candidate_name, 0.0), candidate_score)
             if score > best_score:
                 best_name, best_score, best_raw = name, score, raw
             if name and score >= 0.98:
                 self.name_cache_rect_by_shape[image_shape] = rect
                 break
-        return best_name, best_score, best_raw
+        name_candidates = sorted(candidates_by_name.items(), key=lambda item: (-item[1], len(item[0]), item[0]))[:8]
+        return best_name, best_score, best_raw, name_candidates
 
     def unique_trait_for_pet(self, name):
         traits = {
@@ -1280,17 +1368,66 @@ class Recognizer:
             for pet in self.pet_data.by_name.get(normalize_text(name), [])
         )
 
-    def resolve_trait_result(self, raw, trait, plus, name="", name_score=0.0, name_raw=""):
-        if name and name_score >= 0.92:
-            expected_trait = self.unique_trait_for_pet(name)
-            if expected_trait:
-                if not trait or not self.pet_has_trait(name, trait) or trait in self.pet_data.nature_name_set:
-                    return raw or name_raw, expected_trait, name, name_score, expected_trait
-                return raw or name_raw, trait, name, name_score, expected_trait
+    def resolve_pet_by_name_and_trait(self, trait, name_candidates=None):
+        matches = self.pet_data.unique_pets(self.pet_data.find_pets_by_trait_exact(trait))
+        if not matches:
+            matches = self.pet_data.unique_pets(self.pet_data.find_pets_by_trait(trait))
+        if not matches:
+            return "", 0.0, ""
+        name_candidates = name_candidates or []
+        by_name = {normalize_text(pet.get("名字", "")): pet for pet in matches}
+        for candidate_name, candidate_score in name_candidates:
+            pet = by_name.get(normalize_text(candidate_name))
+            if pet:
+                return pet.get("名字", ""), max(0.93, candidate_score), pet.get("特性", "")
+        if len(matches) == 1:
+            pet = matches[0]
+            return pet.get("名字", ""), 1.0, pet.get("特性", "")
+        pet = matches[0]
+        return pet.get("名字", ""), 0.88, pet.get("特性", "")
+
+    def trait_conflicts_current_nature(self, trait, plus, minus="", raw=""):
+        nature = nature_by_stats(plus, minus) if plus and minus else None
+        if not nature:
+            return normalize_text(trait) in self.pet_data.nature_name_set
+        trait_key = normalize_text(trait)
+        nature_key = normalize_text(nature["name"])
+        raw_key = normalize_text(raw)
+        if not trait_key:
+            return False
+        if trait_key == nature_key:
+            return True
+        if (nature_key, trait_key) in AMBIGUOUS_NATURE_TRAIT_PAIRS and nature_key in raw_key and trait_key not in raw_key:
+            return True
+        return False
+
+    def safe_trait_from_region_text(self, text, plus, minus):
+        trait = self.pet_data.match_trait(text)
+        if not trait:
+            return ""
+        if normalize_text(trait) in self.pet_data.nature_name_set:
+            return ""
+        nature = nature_by_stats(plus, minus) if plus and minus else None
+        if nature and (normalize_text(nature["name"]), normalize_text(trait)) in AMBIGUOUS_NATURE_TRAIT_PAIRS:
+            return ""
+        return trait
+
+    def resolve_trait_result(self, raw, trait, plus, minus="", name="", name_score=0.0, name_raw="", name_candidates=None, trusted_trait=False):
+        name_candidates = list(name_candidates or [])
+        if name and not any(normalize_text(candidate_name) == normalize_text(name) for candidate_name, _score in name_candidates):
+            name_candidates.insert(0, (name, name_score))
+        if not trusted_trait and self.trait_conflicts_current_nature(trait, plus, minus, raw):
+            if name:
+                expected_trait = self.unique_trait_for_pet(name)
+                return raw or name_raw, expected_trait or "", name, name_score, expected_trait
+            return raw, "", "", 0.0, ""
+        pet, score, matched_trait = self.resolve_pet_by_name_and_trait(trait, name_candidates)
+        if pet:
+            return raw, matched_trait or trait, pet, score, matched_trait
         pet, score, matched_trait = trait_pet_name(self.pet_data, trait, plus, name if name_score >= 0.92 else "")
         return raw, matched_trait or trait, pet, score, matched_trait
 
-    def recognize_trait(self, image, plus):
+    def recognize_trait(self, image, plus, minus=""):
         image_shape = image.shape[:2]
         cached_raw, cached_trait = "", ""
         trait_cache = self.trait_cache_by_shape.get(image_shape)
@@ -1300,18 +1437,13 @@ class Recognizer:
             fast_crop = crop_ocr_line(crop, trait_rect)
             cached_raw = ocr_text(self.ocr, fast_crop, detect=False)
             cached_trait = self.pet_data.match_trait(cached_raw)
-            if cached_trait and cached_trait not in self.pet_data.nature_name_set:
-                unique_pet = self.unique_pet_for_trait(cached_trait)
-                if unique_pet:
-                    return cached_raw, cached_trait, unique_pet, 1.0, cached_trait
+            if cached_trait and not self.trait_conflicts_current_nature(cached_trait, plus, minus, cached_raw):
+                if not self.unique_pet_for_trait(cached_trait):
+                    self.trait_first_shapes.discard(image_shape)
+            elif cached_trait:
                 self.trait_first_shapes.discard(image_shape)
 
-        name, name_score, name_raw = self.recognize_pet_name(image)
-        if name and name_score >= 0.98:
-            self.trait_first_shapes.discard(image_shape)
-            pet_trait = self.unique_trait_for_pet(name)
-            if pet_trait:
-                return name_raw, pet_trait, name, name_score, pet_trait
+        name, name_score, name_raw, name_candidates = self.recognize_pet_name_candidates(image)
 
         if not cached_trait and trait_cache:
             crop_rect, trait_rect = trait_cache
@@ -1321,46 +1453,38 @@ class Recognizer:
             cached_trait = self.pet_data.match_trait(cached_raw)
 
         if cached_trait:
-            if name_score < 0.92 and cached_trait not in self.pet_data.nature_name_set and self.unique_pet_for_trait(cached_trait):
+            if name_score < 0.92 and not self.trait_conflicts_current_nature(cached_trait, plus, minus, cached_raw) and self.unique_pet_for_trait(cached_trait):
                 self.trait_first_shapes.add(image_shape)
-            return self.resolve_trait_result(cached_raw, cached_trait, plus, name, name_score, name_raw)
-
-        if image.shape[1] >= 1000:
-            for rect in FAST_TRAIT_LINE_RECTS:
-                fast_crop = crop_relative_ocr_line(image, rect)
-                fast_raw = ocr_text(self.ocr, fast_crop, detect=False)
-                fast_trait = self.pet_data.match_trait(fast_raw)
-                if fast_trait:
-                    return self.resolve_trait_result(fast_raw, fast_trait, plus, name, name_score, name_raw)
+            return self.resolve_trait_result(cached_raw, cached_trait, plus, minus, name, name_score, name_raw, name_candidates, trusted_trait=True)
 
         fallback_raw = ""
+        fallback_texts = []
         for crop_rect in ordered_trait_crop_rects(image):
             crop = crop_trait_region(image, crop_rect)
             result = ocr_result(self.ocr, crop, detect=True)
-            trait_raw = "".join(result.txts or [])
-            if trait_raw and not fallback_raw:
-                fallback_raw = trait_raw
-            trait_match = self.pet_data.match_trait(trait_raw)
+            crop_raw = "".join(result.txts or [])
+            if crop_raw:
+                fallback_texts.append(crop_raw)
+            if crop_raw and not fallback_raw:
+                fallback_raw = crop_raw
+            trait_raw, trait_match, rect = trait_match_from_ocr_result(result, crop.shape, crop_rect, self.pet_data)
             if not trait_match:
                 continue
-            rect = trait_rect_from_ocr(result, crop.shape, trait_match, self.pet_data)
             if rect:
                 self.trait_cache_shape = image_shape
                 self.trait_cache_crop_rect = crop_rect
                 self.trait_cache_rect = rect
                 self.trait_cache_by_shape[image_shape] = (crop_rect, rect)
-                if name_score < 0.92 and trait_match not in self.pet_data.nature_name_set and self.unique_pet_for_trait(trait_match):
+                if name_score < 0.92 and not self.trait_conflicts_current_nature(trait_match, plus, minus, trait_raw) and self.unique_pet_for_trait(trait_match):
                     self.trait_first_shapes.add(image_shape)
-            return self.resolve_trait_result(trait_raw, trait_match, plus, name, name_score, name_raw)
+            return self.resolve_trait_result(trait_raw, trait_match, plus, minus, name, name_score, name_raw, name_candidates, trusted_trait=True)
 
-        pet, score, matched_trait = trait_pet_name(self.pet_data, fallback_raw, plus, name if name_score >= 0.92 else "")
-        if not pet:
-            if name:
-                pet = name
-                score = name_score
-                matched_trait = self.unique_trait_for_pet(name)
-                if not fallback_raw:
-                    fallback_raw = name_raw
+        for text in fallback_texts:
+            fallback_trait = self.safe_trait_from_region_text(text, plus, minus)
+            if fallback_trait:
+                return self.resolve_trait_result(text, fallback_trait, plus, minus, name, name_score, name_raw, name_candidates)
+
+        pet, score, matched_trait = "", 0.0, ""
         return fallback_raw, matched_trait or fallback_raw, pet, score, matched_trait
 
     def read_panel_stats(self, image, panel):
@@ -1390,7 +1514,11 @@ class Recognizer:
         ivs = normalize_iv_displays(iv_displays, iv_multiplier)
 
         # OCR trait text
-        trait_raw, trait, pet, score, _matched_trait = self.recognize_trait(image, arrows.get("plus", ""))
+        trait_raw, trait, pet, score, _matched_trait = self.recognize_trait(
+            image,
+            arrows.get("plus", ""),
+            arrows.get("minus", ""),
+        )
 
         # The current workflow identifies the pet through the trait area. A
         # full name OCR fallback is both slower and easier to confuse with
