@@ -739,8 +739,8 @@ class MainWindow(QWidget):
         self.setObjectName("mainWindow")
         self.setWindowTitle("精灵鉴定器")
         self.setWindowIcon(QIcon(str(resource_path("assets/app.ico"))))
-        self.setMinimumSize(500, 620)
-        self.resize(540, 720)
+        self.setMinimumSize(500, 860)
+        self.resize(540, 860)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -838,6 +838,18 @@ class MainWindow(QWidget):
         self.plan_select.setObjectName("planSelect")
         self.delete_plan_btn = QPushButton("删除选中方案")
         self.delete_plan_btn.clicked.connect(self.app.delete_custom_plan)
+        for control in (
+            self.hotkey_edit,
+            self.region_select,
+            self.plan_pet,
+            self.plan_name,
+            self.plan_stats,
+            self.plan_natures,
+            self.plan_select,
+        ):
+            control.setMinimumHeight(34)
+        for button in (self.float_btn, self.hotkey_btn, self.region_btn, self.delete_region_btn, self.save_plan_btn, self.delete_plan_btn):
+            button.setMinimumHeight(36)
         form.addWidget(self.plan_pet, 0, 0)
         form.addWidget(self.plan_name, 0, 1)
         form.addWidget(self.plan_stats, 1, 0, 1, 2)
@@ -850,7 +862,10 @@ class MainWindow(QWidget):
         self.plan_list.setReadOnly(True)
         self.plan_list.setMinimumHeight(120)
         custom_card.layout().addWidget(self.plan_list)
-        root.addWidget(custom_card, 1)
+        root.addWidget(custom_card)
+        root.addStretch(1)
+        QTimer.singleShot(0, self.refresh_initial_layout)
+        QTimer.singleShot(120, self.refresh_initial_layout)
 
     def card(self, title=None):
         frame = QFrame()
@@ -863,6 +878,10 @@ class MainWindow(QWidget):
             label.setObjectName("sectionTitle")
             layout.addWidget(label)
         return frame
+
+    def refresh_initial_layout(self):
+        self.layout().invalidate()
+        self.updateGeometry()
 
     def set_float_running(self, running):
         self.float_btn.setText("关闭悬浮球" if running else "启动悬浮球")
