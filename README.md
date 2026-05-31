@@ -1,4 +1,4 @@
-<img width="1614" height="1231" alt="a68968070c50685e7fe0b512e1aa0c32" src="https://github.com/user-attachments/assets/cca804d7-75f6-4a7b-9756-5201881a3188" /># PetAnalyzer
+# PetAnalyzer
 
 精灵鉴定器，用于识别《洛克王国：世界》桌面端窗口中的精灵鉴定界面，并根据 `data/pet_plans.json` 计算培养道具消耗。
 
@@ -28,7 +28,7 @@ dist\PetAnalyzerSetup.exe
 ```
 
 ## 框选识别位置
-<img width="1614" height="1231" alt="a68968070c50685e7fe0b512e1aa0c32" src="https://github.com/user-attachments/assets/741a0d0a-26d1-42ec-855c-3176e7b897c4" />
+<img width="1614" height="1231" alt="e38c5753e25d8fbc0964e46f1f8626fa" src="https://github.com/user-attachments/assets/959a4fcf-b34b-440b-933c-ec686858c76b" />
 
 ## 已配置框选分辨率
 
