@@ -27,6 +27,10 @@ dist\PetAnalyzer\PetAnalyzer.exe
 dist\PetAnalyzerSetup.exe
 ```
 
+## 分辨率设置
+<img width="1614" height="1231" alt="7827ccf0-d426-41a4-bcc0-57c4f3fcb125" src="https://github.com/user-attachments/assets/1e38ade8-61af-42ea-9415-d010dd5917a2" />
+
+
 ## 识别内容
 
 - 特性文字，用于匹配 `pet_plans.json` 中的 `特性` 字段。
