@@ -1,6 +1,6 @@
 #define MyAppName "精灵鉴定器"
 #define MyAppEnglishName "PetAnalyzer"
-#define MyAppVersion "1.1"
+#define MyAppVersion "1.3"
 #define MyAppPublisher "PocketBole"
 #define MyAppExeName "PetAnalyzer.exe"
 #ifndef BuildRoot

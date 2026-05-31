@@ -10,6 +10,7 @@ __pycache__/
 build/
 dist/
 dist_build/
+build_tmp/
 
 # PyInstaller spec
 *.spec

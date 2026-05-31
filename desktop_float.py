@@ -8,11 +8,12 @@ import time
 from pathlib import Path
 
 import win32con
-from PyQt6.QtCore import QObject, Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QPixmap
+from PyQt6.QtCore import QObject, QRect, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtGui import QColor, QCursor, QIcon, QImage, QKeySequence, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -61,7 +62,9 @@ def load_settings():
 def save_settings(settings):
     path = local_data_path("data/settings.json")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+    current = load_settings()
+    current.update(settings)
+    path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def configure_windows_app_id():
@@ -361,6 +364,186 @@ class TrayPopup(QWidget):
         self.app.quit_app()
 
 
+REGION_STEPS = (
+    ("name", "精灵名称", "框选右上角精灵名称文字，不要框选性别、属性图标。"),
+    ("trait", "特性", "框选左下角特性文字，不要框选右侧性格文字。"),
+    ("nature", "资质列表", "框选完整 6 行资质列表，需同时包含绿色/红色箭头和黄色 + 个体加成。"),
+)
+
+REGION_COLORS = {
+    "name": QColor("#f2bd4d"),
+    "trait": QColor("#20b894"),
+    "nature": QColor("#ef6b66"),
+}
+
+
+class RegionCanvas(QWidget):
+    def __init__(self, image, max_width, max_height):
+        super().__init__()
+        self.setObjectName("regionCanvas")
+        self.image_h, self.image_w = image.shape[:2]
+        self.scale = min(max_width / max(1, self.image_w), max_height / max(1, self.image_h), 1.0)
+        self.display_w = max(1, int(self.image_w * self.scale))
+        self.display_h = max(1, int(self.image_h * self.scale))
+        rgb = image[:, :, ::-1].copy()
+        qimage = QImage(rgb.data, self.image_w, self.image_h, self.image_w * 3, QImage.Format.Format_RGB888).copy()
+        self.pixmap = QPixmap.fromImage(qimage).scaled(
+            self.display_w,
+            self.display_h,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setFixedSize(self.display_w, self.display_h)
+        self.step_key = ""
+        self.regions = {}
+        self.current_rect = QRect()
+        self.drag_start = None
+
+    def set_step(self, key, regions):
+        self.step_key = key
+        self.regions = dict(regions or {})
+        self.current_rect = self.rect_from_region(self.regions.get(key))
+        self.update()
+
+    def clear_current(self):
+        self.current_rect = QRect()
+        self.update()
+
+    def rect_from_region(self, region):
+        if not region or len(region) != 4:
+            return QRect()
+        x, y, w, h = [float(value) for value in region]
+        return QRect(
+            int(round(x * self.display_w)),
+            int(round(y * self.display_h)),
+            int(round(w * self.display_w)),
+            int(round(h * self.display_h)),
+        ).normalized()
+
+    def current_region(self):
+        rect = self.current_rect.normalized()
+        if rect.width() < 6 or rect.height() < 6:
+            return None
+        return [
+            round(rect.left() / self.display_w, 6),
+            round(rect.top() / self.display_h, 6),
+            round(rect.width() / self.display_w, 6),
+            round(rect.height() / self.display_h, 6),
+        ]
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#202326"))
+        painter.drawPixmap(0, 0, self.pixmap)
+        for key, label, _hint in REGION_STEPS:
+            region = self.regions.get(key)
+            if not region or key == self.step_key:
+                continue
+            pen = QPen(REGION_COLORS.get(key, QColor("#f2bd4d")), 2)
+            painter.setPen(pen)
+            draw_rect = self.rect_from_region(region)
+            painter.drawRect(draw_rect)
+            painter.drawText(draw_rect.adjusted(4, 4, -4, -4), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop, label)
+        if not self.current_rect.isNull():
+            pen = QPen(REGION_COLORS.get(self.step_key, QColor("#f2bd4d")), 3)
+            painter.setPen(pen)
+            painter.drawRect(self.current_rect.normalized())
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        self.drag_start = event.position().toPoint()
+        self.current_rect = QRect(self.drag_start, self.drag_start)
+        self.update()
+
+    def mouseMoveEvent(self, event):
+        if self.drag_start is None:
+            return
+        pos = event.position().toPoint()
+        pos.setX(max(0, min(self.display_w - 1, pos.x())))
+        pos.setY(max(0, min(self.display_h - 1, pos.y())))
+        self.current_rect = QRect(self.drag_start, pos).normalized()
+        self.update()
+
+    def mouseReleaseEvent(self, event):
+        if self.drag_start is not None:
+            self.mouseMoveEvent(event)
+        self.drag_start = None
+
+
+class RegionCalibrationDialog(QDialog):
+    def __init__(self, image, existing_regions=None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("regionDialog")
+        self.setWindowTitle("框选识别位置")
+        self.setWindowIcon(QIcon(str(resource_path("assets/app.ico"))))
+        self.image_h, self.image_w = image.shape[:2]
+        self.resolution_key = f"{self.image_w}x{self.image_h}"
+        self.regions = dict(existing_regions or {})
+        self.step_index = 0
+
+        screen = QApplication.primaryScreen()
+        available = screen.availableGeometry() if screen else None
+        max_width = min(1120, (available.width() - 120) if available else 1120)
+        max_height = min(680, (available.height() - 190) if available else 680)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        self.title = QLabel()
+        self.title.setObjectName("sectionTitle")
+        self.hint = QLabel()
+        self.hint.setObjectName("muted")
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.title)
+        layout.addWidget(self.hint)
+
+        self.canvas = RegionCanvas(image, max_width, max_height)
+        layout.addWidget(self.canvas)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.reset_btn = QPushButton("重选当前")
+        self.reset_btn.clicked.connect(self.reset_current)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.clicked.connect(self.reject)
+        self.next_btn = QPushButton("下一项")
+        self.next_btn.clicked.connect(self.accept_step)
+        buttons.addWidget(self.reset_btn)
+        buttons.addStretch(1)
+        buttons.addWidget(self.cancel_btn)
+        buttons.addWidget(self.next_btn)
+        layout.addLayout(buttons)
+        self.refresh_step()
+
+    def refresh_step(self):
+        key, label, hint = REGION_STEPS[self.step_index]
+        self.title.setText(f"{self.resolution_key}｜{self.step_index + 1}/{len(REGION_STEPS)}：{label}")
+        self.hint.setText(hint)
+        self.next_btn.setText("保存" if self.step_index == len(REGION_STEPS) - 1 else "下一项")
+        self.canvas.set_step(key, self.regions)
+
+    def reset_current(self):
+        key, _label, _hint = REGION_STEPS[self.step_index]
+        self.regions.pop(key, None)
+        self.canvas.clear_current()
+
+    def accept_step(self):
+        key, label, _hint = REGION_STEPS[self.step_index]
+        region = self.canvas.current_region()
+        if region:
+            self.regions[key] = region
+        elif key not in self.regions:
+            show_app_warning(self, "框选识别位置", f"请先框选“{label}”区域。")
+            return
+        if self.step_index < len(REGION_STEPS) - 1:
+            self.step_index += 1
+            self.refresh_step()
+            return
+        self.accept()
+
+
 class PanelWindow(QWidget):
     def __init__(self, app):
         super().__init__()
@@ -556,8 +739,8 @@ class MainWindow(QWidget):
         self.setObjectName("mainWindow")
         self.setWindowTitle("精灵鉴定器")
         self.setWindowIcon(QIcon(str(resource_path("assets/app.ico"))))
-        self.setMinimumSize(500, 560)
-        self.resize(540, 640)
+        self.setMinimumSize(500, 620)
+        self.resize(540, 720)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(14, 14, 14, 14)
@@ -612,6 +795,30 @@ class MainWindow(QWidget):
         hotkey_grid.setColumnStretch(0, 1)
         hotkey_card.layout().addLayout(hotkey_grid)
         root.addWidget(hotkey_card)
+
+        region_card = self.card("识别位置")
+        region_grid = QGridLayout()
+        region_grid.setHorizontalSpacing(8)
+        region_grid.setVerticalSpacing(8)
+        self.region_btn = QPushButton("框选识别位置")
+        self.region_btn.clicked.connect(self.app.calibrate_regions)
+        self.region_select = QComboBox()
+        self.region_select.setObjectName("regionSelect")
+        self.delete_region_btn = QPushButton("删除选中分辨率")
+        self.delete_region_btn.clicked.connect(self.app.delete_selected_regions)
+        self.region_state = QLabel("未设置")
+        self.region_state.setObjectName("muted")
+        self.region_hint = QLabel("按游戏窗口分辨率保存：精灵名称、特性、资质列表区域。")
+        self.region_hint.setObjectName("muted")
+        self.region_hint.setWordWrap(True)
+        region_grid.addWidget(self.region_btn, 0, 0)
+        region_grid.addWidget(self.region_state, 0, 1)
+        region_grid.addWidget(self.region_select, 1, 0)
+        region_grid.addWidget(self.delete_region_btn, 1, 1)
+        region_grid.addWidget(self.region_hint, 2, 0, 1, 2)
+        region_grid.setColumnStretch(0, 1)
+        region_card.layout().addLayout(region_grid)
+        root.addWidget(region_card)
 
         custom_card = self.card("自定义培养方案")
         form = QGridLayout()
@@ -702,12 +909,14 @@ class FloatDesktopApp:
         self.loader = None
         self.engine_loading = False
         self.pending_recognition = False
+        self.pending_calibration = False
         self.hotkey_thread = None
         self.hotkey_bridge = HotkeyBridge()
         self.hotkey_bridge.hotkey.connect(self.on_hotkey)
         self.hotkey_bridge.failed.connect(self.on_hotkey_error)
         settings = load_settings()
         self.hotkey_text = settings.get("hotkey", "Ctrl+F")
+        self.recognition_regions = settings.get("recognition_regions", {}) or {}
         self.hotkey_running = False
         self.custom_plans = load_custom_plans()
         self.float_running = False
@@ -721,6 +930,7 @@ class FloatDesktopApp:
         self.panel = PanelWindow(self)
         self.tray = self.build_tray()
         self.main.refresh_plans(self.custom_plans)
+        self.update_region_state()
         self.main.show()
         self.panel.status.setText("就绪")
         self.panel.recognize_btn.setEnabled(True)
@@ -768,6 +978,8 @@ class FloatDesktopApp:
         return """
         QWidget { font-family: "Microsoft YaHei UI"; color: #f4f0e5; background: transparent; }
         #mainWindow { background: #181b1d; }
+        #regionDialog { background: #181b1d; }
+        #regionCanvas { background: #202326; border: 1px solid #34383b; border-radius: 10px; }
         #ballIcon { background: transparent; border: 0; }
         #shell { background: #181b1d; border: 1px solid #34383b; border-radius: 16px; }
         #header { background: #181b1d; border-top-left-radius: 16px; border-top-right-radius: 16px; border-bottom: 1px solid #2b2f32; }
@@ -832,6 +1044,7 @@ class FloatDesktopApp:
             return
         self.recognizer = recognizer
         self.pet_data = pet_data
+        self.recognizer.set_manual_regions(self.recognition_regions)
         self.engine_loading = False
         self.panel.status.setText("就绪")
         self.panel.message.setText(f"RapidOCR 已加载，推荐表 {len(self.pet_data.names)} 只精灵。")
@@ -840,6 +1053,9 @@ class FloatDesktopApp:
         if self.pending_recognition:
             self.pending_recognition = False
             QTimer.singleShot(0, self.recognize)
+        if self.pending_calibration:
+            self.pending_calibration = False
+            QTimer.singleShot(0, self.calibrate_regions)
 
     def toggle_panel(self):
         if not self.float_running:
@@ -867,6 +1083,76 @@ class FloatDesktopApp:
 
     def collapse(self):
         self.panel.hide()
+
+    def update_region_state(self, current_key=None):
+        keys = sorted(self.recognition_regions.keys(), key=self.resolution_sort_key)
+        selected = current_key or self.main.region_select.currentText()
+        self.main.region_select.blockSignals(True)
+        self.main.region_select.clear()
+        if keys:
+            self.main.region_select.addItems(keys)
+            if selected in keys:
+                self.main.region_select.setCurrentText(selected)
+        else:
+            self.main.region_select.addItem("暂无已设置分辨率")
+        self.main.region_select.setEnabled(bool(keys))
+        self.main.delete_region_btn.setEnabled(bool(keys))
+        self.main.region_select.blockSignals(False)
+        if current_key:
+            self.main.region_state.setText(f"已保存：{current_key}")
+        elif keys:
+            self.main.region_state.setText(f"已设置 {len(keys)} 个分辨率")
+        else:
+            self.main.region_state.setText("未设置")
+
+    def resolution_sort_key(self, key):
+        match = re.fullmatch(r"(\d+)x(\d+)", str(key or ""))
+        if not match:
+            return (0, 0, str(key))
+        width, height = int(match.group(1)), int(match.group(2))
+        return (width * height, width, height)
+
+    def calibrate_regions(self):
+        if self.worker and self.worker.isRunning():
+            show_app_warning(self.main, "框选识别位置", "正在鉴定中，请等待本次鉴定完成后再框选。")
+            return
+        if not self.recognizer:
+            self.pending_calibration = True
+            self.main.status.setText("正在加载识别引擎，加载完成后开始框选")
+            self.load_engine()
+            return
+        try:
+            image = self.recognizer.capture.frame()
+        except Exception as error:
+            show_app_warning(self.main, "框选识别位置", str(error))
+            return
+        h, w = image.shape[:2]
+        key = f"{w}x{h}"
+        dialog = RegionCalibrationDialog(image, self.recognition_regions.get(key, {}), self.main)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.recognition_regions[key] = dict(dialog.regions)
+        save_settings({"recognition_regions": self.recognition_regions})
+        if self.recognizer:
+            self.recognizer.set_manual_regions(self.recognition_regions)
+        self.update_region_state(key)
+        self.main.status.setText(f"已保存 {key} 识别位置")
+
+    def delete_selected_regions(self):
+        key = self.main.region_select.currentText().strip()
+        if not key or key == "暂无已设置分辨率":
+            self.main.status.setText("没有可删除的识别位置")
+            return
+        if key not in self.recognition_regions:
+            self.main.status.setText(f"{key} 没有手动识别位置")
+            self.update_region_state()
+            return
+        self.recognition_regions.pop(key, None)
+        save_settings({"recognition_regions": self.recognition_regions})
+        if self.recognizer:
+            self.recognizer.set_manual_regions(self.recognition_regions)
+        self.update_region_state()
+        self.main.status.setText(f"已清除 {key} 识别位置")
 
     def on_hotkey_changed(self, sequence):
         text = sequence.toString(QKeySequence.SequenceFormat.PortableText)

@@ -33,32 +33,6 @@ VALID_IV_DISPLAY_VALUES = {base * multiplier for base in BASE_IV_VALUES for mult
 AMBIGUOUS_NATURE_TRAIT_PAIRS = {
     ("警惕", "预警"),
 }
-TRAIT_CROP_RECTS = (
-    (0.58, 0.66, 0.22, 0.22),
-    (0.62, 0.54, 0.25, 0.24),
-    (0.54, 0.64, 0.25, 0.24),
-    (0.58, 0.68, 0.22, 0.20),
-    (0.46, 0.52, 0.32, 0.28),
-)
-FAST_TRAIT_LINE_RECTS = (
-    (0.665, 0.622, 0.105, 0.052),
-    (0.654, 0.617, 0.125, 0.060),
-    (0.646, 0.628, 0.145, 0.055),
-    (0.650, 0.610, 0.100, 0.052),
-    (0.640, 0.625, 0.115, 0.055),
-    (0.657, 0.692, 0.095, 0.044),
-    (0.650, 0.684, 0.105, 0.052),
-    (0.642, 0.690, 0.120, 0.055),
-    (0.625, 0.695, 0.130, 0.055),
-)
-PET_NAME_LINE_RECTS = (
-    (0.600, 0.100, 0.160, 0.060),
-    (0.650, 0.100, 0.140, 0.060),
-    (0.600, 0.120, 0.160, 0.060),
-    (0.630, 0.120, 0.180, 0.080),
-    (0.640, 0.130, 0.160, 0.060),
-    (0.660, 0.135, 0.130, 0.050),
-)
 NATURES = [
     {"name": "固执", "plus": "物攻", "minus": "魔攻"},
     {"name": "大胆", "plus": "物攻", "minus": "物防"},
@@ -704,70 +678,116 @@ def choose_arrow_pair(plus_candidates, minus_candidates, row_step):
     return best[1], best[2]
 
 
-def detect_arrows(image, rows, row_step, panel=None):
+def relative_rect_to_bounds(image, rect):
+    if not rect or len(rect) != 4:
+        return None
     h, w = image.shape[:2]
-    search_regions = []
-    if panel:
-        panel_width = panel["x1"] - panel["x0"]
-        search_regions.append((
-            max(0, int(panel["x0"] - panel_width * 0.04)),
-            min(w, int(panel["x0"] + panel_width * 0.58)),
-        ))
-        expanded_x1 = min(w, int(panel["x1"] + panel_width * 0.08))
-        if panel["x0"] <= 0 and panel["x1"] >= w - 1:
-            expanded_x1 = min(w, int(w * 0.78))
-        search_regions.append((
-            max(0, int(panel["x0"] - panel_width * 0.08)),
-            expanded_x1,
-        ))
-    else:
-        search_regions.append((0, int(w * 0.70)))
-    search_regions.append((0, int(w * 0.78)))
+    try:
+        x, y, rw, rh = [float(value) for value in rect]
+    except (TypeError, ValueError):
+        return None
+    if rw <= 0 or rh <= 0:
+        return None
+    x0 = max(0, min(w - 1, int(round(x * w))))
+    y0 = max(0, min(h - 1, int(round(y * h))))
+    x1 = max(0, min(w, int(round((x + rw) * w))))
+    y1 = max(0, min(h, int(round((y + rh) * h))))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    return x0, y0, x1, y1
 
-    deduped_regions = []
-    for x0, x1 in search_regions:
-        x0 = max(0, min(w, x0))
-        x1 = max(0, min(w, x1))
-        if x1 - x0 < max(40, int(row_step)):
-            continue
-        if (x0, x1) not in deduped_regions:
-            deduped_regions.append((x0, x1))
 
-    y0, y1 = max(0, int(min(rows) - row_step * 0.28)), min(h, int(max(rows) + row_step * 0.28))
-    result = {"plus": "", "minus": ""}
-    for x0, x1 in deduped_regions:
-        region = image[y0:y1, x0:x1]
-        rgb = region[:, :, ::-1]
-        green_mask = (
+def manual_arrow_candidates(image, rect, color, rows, row_step):
+    bounds = relative_rect_to_bounds(image, rect)
+    if not bounds:
+        return []
+    x0, y0, x1, y1 = bounds
+    region = image[y0:y1, x0:x1]
+    if region.size == 0:
+        return []
+    rgb = region[:, :, ::-1]
+    if color == "green":
+        mask = (
             (rgb[:, :, 1] > 125)
             & (rgb[:, :, 0] < 125)
             & (rgb[:, :, 2] < 120)
             & (rgb[:, :, 1] > rgb[:, :, 0] * 1.35)
         )
-        red_mask = (
+    else:
+        mask = (
             (rgb[:, :, 0] > 135)
             & (rgb[:, :, 1] < 130)
             & (rgb[:, :, 2] < 130)
             & (rgb[:, :, 0] > rgb[:, :, 1] * 1.25)
         )
-        plus_candidates = arrow_candidates_from_mask(green_mask, x0, y0, rows, row_step)
-        minus_candidates = arrow_candidates_from_mask(red_mask, x0, y0, rows, row_step)
-        pair = choose_arrow_pair(plus_candidates, minus_candidates, row_step)
-        if not pair:
-            continue
+    return arrow_candidates_from_mask(mask, x0, y0, rows, row_step)
+
+
+def detect_manual_arrows(image, rows, row_step, manual_regions=None):
+    manual_regions = manual_regions or {}
+    nature_rect = manual_regions.get("nature")
+    plus_rect = nature_rect or manual_regions.get("nature_plus")
+    minus_rect = nature_rect or manual_regions.get("nature_minus")
+    plus_candidates = manual_arrow_candidates(image, plus_rect, "green", rows, row_step)
+    minus_candidates = manual_arrow_candidates(image, minus_rect, "red", rows, row_step)
+    if not plus_candidates or not minus_candidates:
+        return {"plus": "", "minus": ""}
+    pair = choose_arrow_pair(plus_candidates, minus_candidates, row_step)
+    if pair:
         plus, minus = pair
-        result["plus"] = SCREEN_STAT_ORDER[plus["index"]]
-        result["minus"] = SCREEN_STAT_ORDER[minus["index"]]
-        break
-    return result
+    else:
+        plus = max(plus_candidates, key=lambda item: item["count"])
+        minus = max(minus_candidates, key=lambda item: item["count"])
+    return {
+        "plus": SCREEN_STAT_ORDER[plus["index"]],
+        "minus": SCREEN_STAT_ORDER[minus["index"]],
+    }
+
+
+def detect_arrows(image, rows, row_step, panel=None, manual_regions=None):
+    manual_regions = manual_regions or {}
+    if manual_regions.get("nature") or manual_regions.get("nature_plus") or manual_regions.get("nature_minus"):
+        return detect_manual_arrows(image, rows, row_step, manual_regions)
+    return {"plus": "", "minus": ""}
+
+
+def manual_stats_panel(image, manual_regions=None):
+    manual_regions = manual_regions or {}
+    bounds = relative_rect_to_bounds(image, manual_regions.get("nature"))
+    if not bounds:
+        return None
+    x0, y0, x1, y1 = bounds
+    height = y1 - y0
+    if height < 60:
+        return None
+    rows, _score = detect_rows_in_region(image, x0, x1, y0, y1)
+    if len(rows) == 6:
+        gaps = [rows[index] - rows[index - 1] for index in range(1, 6)]
+        row_step = median(gaps) or (height / 6)
+    else:
+        row_step = height / 6
+        rows = [y0 + row_step * (index + 0.5) for index in range(6)]
+    return {
+        "rows": rows,
+        "row_step": row_step,
+        "x0": x0,
+        "x1": x1,
+        "y0": y0,
+        "y1": y1,
+        "manual": True,
+    }
 
 
 def yellow_runs(image, row_y, row_step, panel=None):
     h, w = image.shape[:2]
     if panel:
-        pad = max(20, int((panel["x1"] - panel["x0"]) * 0.10))
-        x0 = max(0, int(panel["x0"] - pad))
-        x1 = min(w, max(int(panel["x1"] + pad), int(w * 0.72)))
+        if panel.get("manual"):
+            x0 = max(0, int(panel["x0"]))
+            x1 = min(w, int(panel["x1"]))
+        else:
+            pad = max(20, int((panel["x1"] - panel["x0"]) * 0.10))
+            x0 = max(0, int(panel["x0"] - pad))
+            x1 = min(w, max(int(panel["x1"] + pad), int(w * 0.72)))
     else:
         x0, x1 = 0, w
     y0 = max(0, int(row_y - row_step * 0.30))
@@ -899,7 +919,10 @@ def parse_iv_display_value(digits):
     return 0
 
 
-def detect_iv_displays(image, rows, row_step, panel=None):
+def detect_iv_displays(image, rows, row_step, panel=None, manual_regions=None):
+    manual_regions = manual_regions or {}
+    if not manual_regions.get("nature"):
+        return {stat: 0 for stat in SCREEN_STAT_ORDER}
     values = {}
     plus_min_width = max(4, int(row_step * 0.14))
     plus_max_width = max(34, int(row_step * 0.19))
@@ -976,196 +999,17 @@ def normalize_iv_displays(displays, multiplier):
     return normalized
 
 
-def detect_ivs(image, rows, row_step):
-    panel = detect_stat_panel(image)
-    displays = detect_iv_displays(image, rows, row_step, panel)
-    return normalize_iv_displays(displays, infer_iv_multiplier(displays))
-
-
-def name_crop(image):
-    h, w = image.shape[:2]
-    rects = [
-        (0.06, 0.025, 0.22, 0.115),
-        (0.085, 0.055, 0.19, 0.075),
-        (0.03, 0.02, 0.30, 0.14),
-    ]
-    crops = []
-    max_width = 1
-    for x, y, rw, rh in rects:
-        crop = image[int(h * y):int(h * (y + rh)), int(w * x):int(w * (x + rw))]
-        crop = cv2.resize(crop, None, fx=3, fy=3, interpolation=cv2.INTER_NEAREST)
-        crops.append(crop)
-        max_width = max(max_width, crop.shape[1])
-    padded = []
-    for crop in crops:
-        canvas = np.full((crop.shape[0], max_width, 3), 255, dtype=np.uint8)
-        canvas[:crop.shape[0], :crop.shape[1]] = crop
-        padded.append(canvas)
-    gutter = np.full((24, max_width, 3), 255, dtype=np.uint8)
-    return np.vstack([padded[0], gutter, padded[1], gutter, padded[2]])
-
-
-def ordered_trait_crop_rects(image):
-    h, w = image.shape[:2]
-    aspect = w / max(1, h)
-    if aspect <= 1.45:
-        order = (1, 4, 2, 0, 3)
-    elif aspect <= 1.60:
-        order = (1, 0, 4, 2, 3)
-    elif aspect <= 1.72:
-        order = (0, 1, 4, 2, 3)
-    else:
-        order = (0, 1, 3, 2, 4)
-    return [TRAIT_CROP_RECTS[index] for index in order]
-
-
-def crop_trait_region(image, rect):
-    h, w = image.shape[:2]
-    x, y, rw, rh = rect
-    crop = image[int(h * y):int(h * (y + rh)), int(w * x):int(w * (x + rw))]
-    target_width = 420
-    scale = target_width / max(1, crop.shape[1])
-    interpolation = cv2.INTER_NEAREST if scale >= 1 else cv2.INTER_AREA
-    return cv2.resize(crop, None, fx=scale, fy=scale, interpolation=interpolation)
-
-
-def crop_relative_ocr_line(image, rect, target_height=48):
-    h, w = image.shape[:2]
-    x, y, rw, rh = rect
-    x0 = max(0, min(w - 1, int(w * x)))
-    x1 = max(x0 + 1, min(w, int(w * (x + rw))))
-    y0 = max(0, min(h - 1, int(h * y)))
-    y1 = max(y0 + 1, min(h, int(h * (y + rh))))
+def crop_manual_ocr_line(image, rect, target_height=48):
+    bounds = relative_rect_to_bounds(image, rect)
+    if not bounds:
+        return None
+    x0, y0, x1, y1 = bounds
     crop = image[y0:y1, x0:x1]
+    if crop.size == 0:
+        return None
     scale = target_height / max(1, crop.shape[0])
-    interpolation = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
+    interpolation = cv2.INTER_CUBIC if scale >= 1 else cv2.INTER_AREA
     return cv2.resize(crop, None, fx=scale, fy=scale, interpolation=interpolation)
-
-
-def trait_crop(image):
-    return crop_trait_region(image, ordered_trait_crop_rects(image)[0])
-
-
-def crop_ocr_line(image, rect):
-    h, w = image.shape[:2]
-    x0, y0, x1, y1 = rect
-    x0 = max(0, min(w - 1, int(x0)))
-    x1 = max(x0 + 1, min(w, int(x1)))
-    y0 = max(0, min(h - 1, int(y0)))
-    y1 = max(y0 + 1, min(h, int(y1)))
-    crop = image[y0:y1, x0:x1]
-    target_height = 48
-    scale = target_height / max(1, crop.shape[0])
-    interpolation = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_AREA
-    return cv2.resize(crop, None, fx=scale, fy=scale, interpolation=interpolation)
-
-
-def trait_rect_from_ocr(result, crop_shape, trait="", pet_data=None):
-    boxes = getattr(result, "boxes", None)
-    txts = getattr(result, "txts", None) or []
-    if boxes is None or len(boxes) == 0:
-        return None
-    h, w = crop_shape[:2]
-    usable = []
-    for index, box in enumerate(boxes):
-        text = normalize_text(txts[index] if index < len(txts) else "")
-        if not text:
-            continue
-        xs = [float(point[0]) for point in box]
-        ys = [float(point[1]) for point in box]
-        width = max(xs) - min(xs)
-        height = max(ys) - min(ys)
-        if width <= 0 or height <= 0:
-            continue
-        matched = False
-        if trait:
-            normalized_trait = normalize_text(trait)
-            matched = normalized_trait in text or (pet_data.match_trait(text) == trait if pet_data else False)
-        usable.append((matched, len(text), width * height, min(xs), min(ys), max(xs), max(ys)))
-    if not usable:
-        return None
-    matched_items = [item for item in usable if item[0]]
-    if matched_items:
-        _matched, _text_len, _area, left, top, right, bottom = min(
-            matched_items,
-            key=lambda item: (item[3], item[4], -item[2]),
-        )
-    else:
-        _matched, _text_len, _area, left, top, right, bottom = max(usable, key=lambda item: (item[1], item[2]))
-    pad_x = max(5, min(15, int((right - left) * 0.20)))
-    x0 = max(0, int(left - pad_x))
-    x1 = min(w, int(right + pad_x))
-    y0 = max(0, int(top - 5))
-    y1 = min(h, int(bottom + 8))
-    if x1 - x0 < 40 or y1 - y0 < 18:
-        return None
-    return x0, y0, x1, y1
-
-
-def trait_match_from_ocr_result(result, crop_shape, crop_rect, pet_data):
-    boxes = getattr(result, "boxes", None)
-    txts = getattr(result, "txts", None) or []
-    if boxes is None or len(boxes) == 0:
-        return "", "", None
-    h, w = crop_shape[:2]
-    crop_x, crop_y, crop_w, crop_h = crop_rect
-    candidates = []
-    left_region_texts = []
-    for index, box in enumerate(boxes):
-        raw = normalize_text(txts[index] if index < len(txts) else "")
-        if not raw:
-            continue
-        compact = compact_text(raw)
-        if not compact or compact.isdigit():
-            continue
-        if any(skip in raw for skip in ("特性", "收起", "修改天分", "前往")):
-            continue
-        xs = [float(point[0]) for point in box]
-        ys = [float(point[1]) for point in box]
-        left = min(xs)
-        top = min(ys)
-        right = max(xs)
-        bottom = max(ys)
-        if right <= left or bottom <= top:
-            continue
-        original_left = crop_x + (left / max(1, w)) * crop_w
-        original_center_y = crop_y + (((top + bottom) * 0.5) / max(1, h)) * crop_h
-        # Only the text under the trait icon is allowed here. The pill to the
-        # right is a nature label and must not participate in pet matching.
-        if not (0.61 <= original_left <= 0.715 and 0.54 <= original_center_y <= 0.735):
-            continue
-        in_left_trait_region = 0.61 <= original_left <= 0.715 and 0.54 <= original_center_y <= 0.735
-        if in_left_trait_region:
-            left_region_texts.append(raw)
-        trait = pet_data.match_trait(raw)
-        if not trait:
-            continue
-        y_penalty = abs(original_center_y - 0.64)
-        x_penalty = abs(original_left - 0.675)
-        exact = normalize_text(trait) == raw
-        in_strict_region = 0.61 <= original_left <= 0.715 and 0.58 <= original_center_y <= 0.735
-        if in_strict_region:
-            candidates.append((0 if exact else 1, y_penalty, x_penalty, raw, trait, (int(left), int(top), int(right), int(bottom))))
-        elif exact:
-            candidates.append((2, y_penalty, x_penalty, raw, trait, (int(left), int(top), int(right), int(bottom))))
-    if not candidates and left_region_texts:
-        combined = "".join(left_region_texts)
-        trait = pet_data.match_trait(combined)
-        if trait:
-            return combined, trait, None
-    if not candidates:
-        return "", "", None
-    candidates.sort()
-    _not_exact, _y_penalty, _x_penalty, raw, trait, rect = candidates[0]
-    x0, y0, x1, y1 = rect
-    pad_x = max(5, min(15, int((x1 - x0) * 0.20)))
-    x0 = max(0, x0 - pad_x)
-    x1 = min(w, x1 + pad_x)
-    y0 = max(0, y0 - 5)
-    y1 = min(h, y1 + 8)
-    if x1 - x0 < 25 or y1 - y0 < 16:
-        return raw, trait, None
-    return raw, trait, (x0, y0, x1, y1)
 
 
 def trait_pet_name(pet_data, trait, plus, preferred_name=""):
@@ -1298,12 +1142,14 @@ class Recognizer:
         self.capture = CaptureSession(PROCESS_NAME)
         self.ocr = RapidOCR()
         self.panel_cache = {}
-        self.trait_cache_shape = None
-        self.trait_cache_crop_rect = None
-        self.trait_cache_rect = None
-        self.trait_cache_by_shape = {}
-        self.trait_first_shapes = set()
-        self.name_cache_rect_by_shape = {}
+        self.manual_regions_by_shape = {}
+
+    def set_manual_regions(self, regions):
+        self.manual_regions_by_shape = regions or {}
+
+    def manual_regions_for_image(self, image):
+        h, w = image.shape[:2]
+        return self.manual_regions_by_shape.get(f"{w}x{h}", {})
 
     def warm_up(self):
         line = np.full((48, 180, 3), 255, dtype=np.uint8)
@@ -1321,27 +1167,20 @@ class Recognizer:
         return name, score, raw
 
     def recognize_pet_name_candidates(self, image):
-        image_shape = image.shape[:2]
-        cached_rect = self.name_cache_rect_by_shape.get(image_shape)
-        rects = PET_NAME_LINE_RECTS
-        if cached_rect:
-            rects = (cached_rect,) + tuple(rect for rect in PET_NAME_LINE_RECTS if rect != cached_rect)
+        manual_regions = self.manual_regions_for_image(image)
         best_name, best_score, best_raw = "", 0.0, ""
         candidates_by_name = {}
-        for rect in rects:
-            crop = crop_relative_ocr_line(image, rect, target_height=64)
-            raw = ocr_text(self.ocr, crop, detect=False)
+        manual_crop = crop_manual_ocr_line(image, manual_regions.get("name"), target_height=64)
+        if manual_crop is not None:
+            raw = ocr_text(self.ocr, manual_crop, detect=False)
             candidates = self.pet_data.name_candidates(raw)
             name, score = self.pet_data.guess_name(raw)
-            if raw and not best_raw:
+            if raw:
                 best_raw = raw
             for candidate_name, candidate_score in candidates:
                 candidates_by_name[candidate_name] = max(candidates_by_name.get(candidate_name, 0.0), candidate_score)
             if score > best_score:
                 best_name, best_score, best_raw = name, score, raw
-            if name and score >= 0.98:
-                self.name_cache_rect_by_shape[image_shape] = rect
-                break
         name_candidates = sorted(candidates_by_name.items(), key=lambda item: (-item[1], len(item[0]), item[0]))[:8]
         return best_name, best_score, best_raw, name_candidates
 
@@ -1401,17 +1240,6 @@ class Recognizer:
             return True
         return False
 
-    def safe_trait_from_region_text(self, text, plus, minus):
-        trait = self.pet_data.match_trait(text)
-        if not trait:
-            return ""
-        if normalize_text(trait) in self.pet_data.nature_name_set:
-            return ""
-        nature = nature_by_stats(plus, minus) if plus and minus else None
-        if nature and (normalize_text(nature["name"]), normalize_text(trait)) in AMBIGUOUS_NATURE_TRAIT_PAIRS:
-            return ""
-        return trait
-
     def resolve_trait_result(self, raw, trait, plus, minus="", name="", name_score=0.0, name_raw="", name_candidates=None, trusted_trait=False):
         name_candidates = list(name_candidates or [])
         if name and not any(normalize_text(candidate_name) == normalize_text(name) for candidate_name, _score in name_candidates):
@@ -1428,69 +1256,35 @@ class Recognizer:
         return raw, matched_trait or trait, pet, score, matched_trait
 
     def recognize_trait(self, image, plus, minus=""):
-        image_shape = image.shape[:2]
-        cached_raw, cached_trait = "", ""
-        trait_cache = self.trait_cache_by_shape.get(image_shape)
-        if trait_cache and image_shape in self.trait_first_shapes:
-            crop_rect, trait_rect = trait_cache
-            crop = crop_trait_region(image, crop_rect)
-            fast_crop = crop_ocr_line(crop, trait_rect)
-            cached_raw = ocr_text(self.ocr, fast_crop, detect=False)
-            cached_trait = self.pet_data.match_trait(cached_raw)
-            if cached_trait and not self.trait_conflicts_current_nature(cached_trait, plus, minus, cached_raw):
-                if not self.unique_pet_for_trait(cached_trait):
-                    self.trait_first_shapes.discard(image_shape)
-            elif cached_trait:
-                self.trait_first_shapes.discard(image_shape)
-
+        manual_regions = self.manual_regions_for_image(image)
         name, name_score, name_raw, name_candidates = self.recognize_pet_name_candidates(image)
-
-        if not cached_trait and trait_cache:
-            crop_rect, trait_rect = trait_cache
-            crop = crop_trait_region(image, crop_rect)
-            fast_crop = crop_ocr_line(crop, trait_rect)
-            cached_raw = ocr_text(self.ocr, fast_crop, detect=False)
-            cached_trait = self.pet_data.match_trait(cached_raw)
-
-        if cached_trait:
-            if name_score < 0.92 and not self.trait_conflicts_current_nature(cached_trait, plus, minus, cached_raw) and self.unique_pet_for_trait(cached_trait):
-                self.trait_first_shapes.add(image_shape)
-            return self.resolve_trait_result(cached_raw, cached_trait, plus, minus, name, name_score, name_raw, name_candidates, trusted_trait=True)
-
-        fallback_raw = ""
-        fallback_texts = []
-        for crop_rect in ordered_trait_crop_rects(image):
-            crop = crop_trait_region(image, crop_rect)
-            result = ocr_result(self.ocr, crop, detect=True)
-            crop_raw = "".join(result.txts or [])
-            if crop_raw:
-                fallback_texts.append(crop_raw)
-            if crop_raw and not fallback_raw:
-                fallback_raw = crop_raw
-            trait_raw, trait_match, rect = trait_match_from_ocr_result(result, crop.shape, crop_rect, self.pet_data)
-            if not trait_match:
-                continue
-            if rect:
-                self.trait_cache_shape = image_shape
-                self.trait_cache_crop_rect = crop_rect
-                self.trait_cache_rect = rect
-                self.trait_cache_by_shape[image_shape] = (crop_rect, rect)
-                if name_score < 0.92 and not self.trait_conflicts_current_nature(trait_match, plus, minus, trait_raw) and self.unique_pet_for_trait(trait_match):
-                    self.trait_first_shapes.add(image_shape)
-            return self.resolve_trait_result(trait_raw, trait_match, plus, minus, name, name_score, name_raw, name_candidates, trusted_trait=True)
-
-        for text in fallback_texts:
-            fallback_trait = self.safe_trait_from_region_text(text, plus, minus)
-            if fallback_trait:
-                return self.resolve_trait_result(text, fallback_trait, plus, minus, name, name_score, name_raw, name_candidates)
-
-        pet, score, matched_trait = "", 0.0, ""
-        return fallback_raw, matched_trait or fallback_raw, pet, score, matched_trait
+        manual_trait_crop = crop_manual_ocr_line(image, manual_regions.get("trait"), target_height=54)
+        if manual_trait_crop is not None:
+            manual_raw = ocr_text(self.ocr, manual_trait_crop, detect=False)
+            manual_trait = self.pet_data.match_trait(manual_raw)
+            if manual_trait:
+                return self.resolve_trait_result(
+                    manual_raw,
+                    manual_trait,
+                    plus,
+                    minus,
+                    name,
+                    name_score,
+                    name_raw,
+                    name_candidates,
+                    trusted_trait=True,
+                )
+            return manual_raw, manual_raw, "", 0.0, ""
+        return "", "", "", 0.0, ""
 
     def read_panel_stats(self, image, panel):
+        manual_regions = self.manual_regions_for_image(image)
+        manual_panel = manual_stats_panel(image, manual_regions)
+        if manual_panel:
+            panel = manual_panel
         rows, row_step = panel["rows"], panel["row_step"]
-        arrows = detect_arrows(image, rows, row_step, panel)
-        iv_displays = detect_iv_displays(image, rows, row_step, panel)
+        arrows = detect_arrows(image, rows, row_step, panel, manual_regions)
+        iv_displays = detect_iv_displays(image, rows, row_step, panel, manual_regions)
         return rows, row_step, arrows, iv_displays
 
     def panel_result_valid(self, arrows, iv_displays):
@@ -1520,9 +1314,8 @@ class Recognizer:
             arrows.get("minus", ""),
         )
 
-        # The current workflow identifies the pet through the trait area. A
-        # full name OCR fallback is both slower and easier to confuse with
-        # unrelated UI text in non-16:9 captures, so keep the raw trait text.
+        # Name, trait, and nature now come only from user-calibrated regions;
+        # keep the raw manual trait OCR text for display/debug context.
         raw = trait_raw
 
         plan = None
